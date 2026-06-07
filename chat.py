@@ -119,7 +119,7 @@ def log_response(message_id, response_msg):
     conn.commit()
     conn.close()
 
-# --- Smart Responder (v1.1 - robust cleaning) ---
+# --- Smart Responder (v1.1 - robust cleaning + strong fallback) ---
 def _clean_hermes_output(raw_output: str) -> str:
     """Strip Hermes CLI banners, debug dumps, session info, and return only the useful reply."""
     if not raw_output:
@@ -183,11 +183,10 @@ def get_responder_response(agent, message_content):
         raw = (result.stdout or result.stderr or "").strip()
         cleaned = _clean_hermes_output(raw)
 
-        if cleaned and len(cleaned) > 8:
+        # Extra safety: reject if it looks like it echoed the prompt or is too prompt-like
+        if cleaned and len(cleaned) > 8 and "internal message" not in cleaned.lower() and "acknowledge receipt" not in cleaned.lower():
             return cleaned
-        else:
-            # Hermes ran but gave us noise or error — fall through to clean static
-            pass
+        # Otherwise fall through to clean static
 
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
         print(f"[responder] Hermes chat attempt failed for model '{model}': {e}", file=sys.stderr)
