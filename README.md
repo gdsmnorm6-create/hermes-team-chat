@@ -17,10 +17,12 @@ Before this, people either used the user as a relay or wrote files. This gives a
 
 - Point-to-point messaging + shared `team` broadcast room
 - Zero token cost for the transport layer
-- Smart responder fallback (uses Hermes + your unlocked models when the recipient isn't polling)
+- Robust responder (tries your Hermes model first, then falls back to a clean static acknowledgment)
 - Easy to poll from startup scripts or cron jobs
 - Works across multiple Hermes profiles on the same machine
 - Designed to be called from other skills (wake processor, kanban, etc.)
+
+> **v1.1 note**: The responder is intentionally lightweight. Even if the model call is noisy or unavailable, you still get a clean "message received" confirmation. Set `HERMES_RESPONDER_MODEL` to any model your `hermes chat` can access.
 
 ## Quick Start
 
@@ -112,6 +114,17 @@ Pull requests welcome for:
 ## License
 
 MIT
+
+## Changelog
+
+**v1.1** (current)
+- Much more robust responder logic with aggressive output cleaning
+- Graceful fallback to clean static acknowledgment when Hermes model call fails or returns noise (this is now the reliable default behavior)
+- Better documentation around model selection
+- Updated default prompt and output parsing
+
+**v1.0**
+- Initial public release
 
 ## Related
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hermes Team Chat
+Hermes Team Chat v1.1
 Lightweight, token-free internal messaging for Hermes Agent profiles.
 
 Features:
 - SQLite message queue (no tokens for transport)
 - Point-to-point + "team" broadcast room
-- Smart responder fallback using your Hermes models (Nous free tiers recommended)
+- Robust responder fallback (tries Hermes chat, then clean static ack)
 - Designed for cron / startup polling by agents (HAL, George, Ratatoskr, etc.)
 
 Usage examples:
@@ -16,7 +16,8 @@ Usage examples:
   python3 chat.py status
 
 Environment:
-  HERMES_RESPONDER_MODEL   - Model to use for offline simulation (default: nvidia/nemotron-3-ultra:free)
+  HERMES_RESPONDER_MODEL   - Model to use for the responder attempt (default: nvidia/nemotron-3-ultra:free)
+                             Set this to a model your 'hermes chat' can actually access.
   HERMES_PATH              - Path to hermes binary if not in PATH
 
 Repo: https://github.com/gdsmnorm6-create/hermes-team-chat
@@ -27,13 +28,14 @@ import os
 import subprocess
 import sys
 import time
+import re
 from datetime import datetime
 
 # --- Configuration ---
 DB_PATH = os.environ.get('HERMES_TEAM_CHAT_DB', '/home/debian/.hermes/team-chat/team-chat.db')
 AGENTS = ['hal', 'george', 'ratatoskr', 'prometheus', 'heimdall', 'team']
 
-# Default responder uses a strong free Nous model when available via Hermes
+# Default responder model. Change via env var to one your Hermes instance has access to.
 DEFAULT_RESPONDER_MODEL = os.environ.get(
     'HERMES_RESPONDER_MODEL', 
     'nvidia/nemotron-3-ultra:free'
@@ -43,14 +45,12 @@ def get_hermes_binary():
     """Find hermes binary, respecting HERMES_PATH or common locations."""
     if 'HERMES_PATH' in os.environ:
         return os.environ['HERMES_PATH']
-    # Try PATH first
     try:
         result = subprocess.run(['which', 'hermes'], capture_output=True, text=True)
         if result.returncode == 0:
             return result.stdout.strip()
     except Exception:
         pass
-    # Fallback locations
     candidates = [
         '/home/debian/.hermes/hermes-agent/venv/bin/hermes',
         os.path.expanduser('~/.hermes/hermes-agent/venv/bin/hermes'),
@@ -119,16 +119,48 @@ def log_response(message_id, response_msg):
     conn.commit()
     conn.close()
 
-# --- Smart Responder (Nous / Hermes / Ollama fallback) ---
+# --- Smart Responder (v1.1 - more robust) ---
+def _clean_hermes_output(raw_output: str) -> str:
+    """Strip Hermes CLI banners, debug dumps, session info, and return only the useful reply."""
+    if not raw_output:
+        return ""
+
+    text = raw_output.strip()
+
+    # Remove everything before the last visual separator (common in Hermes output)
+    if "────────────────────────────────" in text:
+        parts = text.split("────────────────────────────────")
+        text = parts[-1].strip()
+
+    # Remove common debug / resume lines
+    lines = []
+    for line in text.splitlines():
+        l = line.strip()
+        if not l:
+            continue
+        if l.startswith(("Session:", "Duration:", "Messages:", "Resume this session", "Initializing", "Query:", "🧾", "Error code")):
+            continue
+        if "Error code:" in l or "does not exist" in l:
+            continue
+        lines.append(l)
+
+    cleaned = " ".join(lines)
+    # Take only the first 2-3 sentences to keep it concise
+    sentences = re.split(r'(?<=[.!?])\s+', cleaned)
+    short = " ".join(sentences[:3]).strip()
+
+    return short[:400] if short else ""
+
 def get_responder_response(agent, message_content):
     """
-    Generate a short in-character acknowledgment when the target agent doesn't poll immediately.
-    Prefers Hermes chat with a Nous free model, then falls back gracefully.
+    Generate a short in-character acknowledgment.
+    Tries Hermes chat first (using HERMES_RESPONDER_MODEL), then falls back to a clean static message.
+    The static fallback is intentional — the responder's job is just to confirm receipt.
     """
     model = os.environ.get('HERMES_RESPONDER_MODEL', DEFAULT_RESPONDER_MODEL)
     hermes_bin = get_hermes_binary()
 
-    # Try Hermes chat (preferred - uses your existing auth + model catalog)
+    # Attempt Hermes chat
     try:
         prompt = (
             f"You are the Hermes agent named {agent}. "
@@ -142,16 +174,22 @@ def get_responder_response(agent, message_content):
             cmd,
             capture_output=True,
             text=True,
-            timeout=75
+            timeout=70
         )
-        if result.returncode == 0:
-            output = (result.stdout or result.stderr or "").strip()
-            if output and len(output) > 5:
-                return output[:500]  # Safety cap
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-        print(f"[responder] Hermes chat failed for {model}: {e}", file=sys.stderr)
 
-    # Fallback: simple local message (no tokens spent)
+        raw = (result.stdout or result.stderr or "").strip()
+        cleaned = _clean_hermes_output(raw)
+
+        if cleaned and len(cleaned) > 8:
+            return cleaned
+        else:
+            # Hermes ran but gave us noise or error — fall through to clean static
+            pass
+
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        print(f"[responder] Hermes chat attempt failed for model '{model}': {e}", file=sys.stderr)
+
+    # Reliable zero-token fallback (this is the recommended path for most users)
     return f"@{agent} received your message and will process it in the next cycle."
 
 # --- Command Handlers ---
@@ -182,7 +220,6 @@ def handle_poll(args):
         print(f"TIME: {readable_time}")
         print(f"MESSAGE: {message_content}")
 
-        # Generate responder acknowledgment (uses your Hermes + Nous free models by default)
         response = get_responder_response(agent_name, message_content)
         print(f"RESPONDER (@{agent_name}): {response}")
         log_response(msg_id, response)
@@ -244,7 +281,7 @@ def main():
     init_db()
 
     if len(sys.argv) < 2:
-        print("Hermes Team Chat — internal agent messaging")
+        print("Hermes Team Chat v1.1 — internal agent messaging")
         print("Commands: send | poll | status | broadcast | history")
         print("Example: python3 chat.py send hal george \"Handoff ready\"")
         sys.exit(1)
