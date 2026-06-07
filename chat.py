@@ -119,7 +119,7 @@ def log_response(message_id, response_msg):
     conn.commit()
     conn.close()
 
-# --- Smart Responder (v1.1 - more robust) ---
+# --- Smart Responder (v1.1 - robust cleaning) ---
 def _clean_hermes_output(raw_output: str) -> str:
     """Strip Hermes CLI banners, debug dumps, session info, and return only the useful reply."""
     if not raw_output:
@@ -127,29 +127,32 @@ def _clean_hermes_output(raw_output: str) -> str:
 
     text = raw_output.strip()
 
-    # Remove everything before the last visual separator (common in Hermes output)
-    if "────────────────────────────────" in text:
-        parts = text.split("────────────────────────────────")
-        text = parts[-1].strip()
-
-    # Remove common debug / resume lines
+    # Remove common Hermes debug / resume / banner lines
     lines = []
     for line in text.splitlines():
         l = line.strip()
         if not l:
             continue
-        if l.startswith(("Session:", "Duration:", "Messages:", "Resume this session", "Initializing", "Query:", "🧾", "Error code")):
-            continue
-        if "Error code:" in l or "does not exist" in l:
+        lower = l.lower()
+        if any(bad in lower for bad in [
+            "session:", "duration:", "messages:", "resume this session",
+            "initializing", "query:", "🧾", "error code", "does not exist",
+            "hermes --resume", "────────────────────────────────"
+        ]):
             continue
         lines.append(l)
 
-    cleaned = " ".join(lines)
-    # Take only the first 2-3 sentences to keep it concise
+    cleaned = " ".join(lines).strip()
+
+    # Take only the first 2-3 sentences
     sentences = re.split(r'(?<=[.!?])\s+', cleaned)
     short = " ".join(sentences[:3]).strip()
 
-    return short[:400] if short else ""
+    # If it's still mostly noise or very short, let caller fall back
+    if len(short) < 12 or "hermes" in short.lower():
+        return ""
+
+    return short[:350]
 
 def get_responder_response(agent, message_content):
     """
